@@ -1,0 +1,76 @@
+
+# Build outputs
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.make
+compile_commands.json
+
+# Binaries and objects
+*.o
+*.obj
+*.lo
+*.la
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.out
+*.app
+*.dSYM/
+*.pch
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+# CUDA
+*.cuo
+*.cubin
+*.ptx
+*.fatbin
+
+# IDE and editor files
+.vscode/
+.idea/
+*.code-workspace
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+env/
+venv/
+
+# Logs and coverage
+*.log
+*.tmp
+*.cache
+*.gcda
+*.gcno
+*.profraw
+*.profdata
+coverage/
+
+# Generated data and artifacts
+tmp/
+*.bin
+*.onnx
+*.ckpt
+*.model
+*.tokenizer
+*.jsonl
+*.parquet
+
+# OS files
+.DS_Store
+Thumbs.db
+
