@@ -110,6 +110,6 @@ void CUDADeviceAllocator::release(void* ptr) const {
   state = cudaFree(ptr);
   CHECK(state == cudaSuccess) << "Error: CUDA error when release memory on device";
 }
-std::shared_ptr<CUDADeviceAllocator> CUDADeviceAllocatorFactory::instance = nullptr;
+// std::shared_ptr<CUDADeviceAllocator> CUDADeviceAllocatorFactory::instance = nullptr;
 
 }  // namespace base

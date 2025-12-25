@@ -65,18 +65,6 @@ class CUDADeviceAllocator : public DeviceAllocator {
   mutable std::map<int, std::vector<CudaMemoryBuffer>> cuda_buffers_map_;
 };
 
-// class CPUDeviceAllocatorFactory {
-//  public:
-//   static std::shared_ptr<CPUDeviceAllocator> get_instance() {
-//     if (instance == nullptr) {
-//       instance = std::make_shared<CPUDeviceAllocator>();
-//     }
-//     return instance;
-//   }
-
-//  private:
-//   static std::shared_ptr<CPUDeviceAllocator> instance;
-// };
 class CPUDeviceAllocatorFactory {
  public:
   static std::shared_ptr<CPUDeviceAllocator> get_instance() {
@@ -89,14 +77,9 @@ class CPUDeviceAllocatorFactory {
 class CUDADeviceAllocatorFactory {
  public:
   static std::shared_ptr<CUDADeviceAllocator> get_instance() {
-    if (instance == nullptr) {
-      instance = std::make_shared<CUDADeviceAllocator>();
-    }
+    static auto instance = std::make_shared<CUDADeviceAllocator>();
     return instance;
   }
-
- private:
-  static std::shared_ptr<CUDADeviceAllocator> instance;
 };
 }  // namespace base
 #endif  // KUIPER_INCLUDE_BASE_ALLOC_H_
