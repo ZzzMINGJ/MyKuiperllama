@@ -83,7 +83,7 @@ void Buffer::copy_from(const Buffer& buffer) const {
 
 void Buffer::copy_from(const Buffer* buffer) const {
   CHECK(allocator_ != nullptr);
-  CHECK(buffer != nullptr || buffer->ptr_ != nullptr);
+  CHECK(buffer != nullptr && buffer->ptr_ != nullptr);
 
   size_t dest_size = byte_size_;
   size_t src_size = buffer->byte_size_;
