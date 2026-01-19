@@ -1,14 +1,4 @@
 cmake_minimum_required(VERSION 3.16)
-
-# === 添加这四行代码 ===
-# 设置库搜索路径，优先使用系统库
-set(CMAKE_PREFIX_PATH "/usr/local;/usr;${CMAKE_PREFIX_PATH}")
-set(CMAKE_LIBRARY_PATH "/usr/lib/x86_64-linux-gnu;/usr/local/lib;${CMAKE_LIBRARY_PATH}")
-# 屏蔽 Anaconda 路径
-list(REMOVE_ITEM CMAKE_PREFIX_PATH "$ENV{HOME}/anaconda3")
-list(REMOVE_ITEM CMAKE_LIBRARY_PATH "$ENV{HOME}/anaconda3/lib")
-# ======================
-
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Set the CUDA compiler path or name
