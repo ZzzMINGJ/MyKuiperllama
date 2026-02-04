@@ -3,6 +3,7 @@
 #include <vector>
 namespace sampler {
 size_t TopKSampler::sample(const float* logits, size_t size, void* stream) {
+
   if (k_ == 0 || k_ >= size) {
     return std::distance(logits, std::max_element(logits, logits + size));
   }

@@ -141,7 +141,7 @@ base::Status Qwen3Model::init(base::DeviceType device_type) {
                                   get_buffer(ModelBufferType::kCosCache), cuda_config_->stream);
   }
 
-  sampler_ = std::make_unique<sampler::TopKSampler>(device_type_);
+  sampler_ = std::make_unique<sampler::TopKSampler>(device_type_,1);
   return error::Success();
 }
 
