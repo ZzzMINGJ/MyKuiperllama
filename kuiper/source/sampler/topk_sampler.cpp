@@ -9,8 +9,7 @@
 
 #include "base/base.h"
 #include "tensor/tensor.h"
-#include "../op/kernels/cuda/topk_kernel.cuh"   // 按你的实际路径 include
-// 或者如果你有统一接口头：#include "../op/kernels_interface.h"
+#include "../op/kernels/cuda/topk_kernel.cuh"
 
 namespace sampler {
 
