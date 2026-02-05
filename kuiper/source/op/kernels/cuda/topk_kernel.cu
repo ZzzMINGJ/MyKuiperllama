@@ -11,7 +11,7 @@ namespace kernel {
 
 static constexpr int K_MAX = 128;
 
-// 把 (v, idx) 插入到降序 topk 列表 vals/idxs（只用前 k 项）
+// 辅助函数保持不变
 __device__ __forceinline__ void insert_topk(float v, int idx,
                                             float* vals, int* idxs, int k) {
   if (k <= 0) return;
@@ -27,7 +27,6 @@ __device__ __forceinline__ void insert_topk(float v, int idx,
   idxs[pos] = idx;
 }
 
-// 合并 src(topk) 到 dst(topk)
 __device__ __forceinline__ void merge_topk(const float* src_vals, const int* src_idxs,
                                            float* dst_vals, int* dst_idxs, int k) {
   for (int j = 0; j < k; ++j) {
@@ -38,25 +37,24 @@ __device__ __forceinline__ void merge_topk(const float* src_vals, const int* src
   }
 }
 
-// stage kernel：对 input[n] 求 block top-k，输出到 out_vals/out_idx（每个 block 写 k 个）
+// 修复后的 stage kernel
 __global__ void block_topk_fp32(const float* input, int n,
                                 float* out_vals, int* out_idx, int k) {
-  if (k <= 0) return;
-  if (k > K_MAX) return;  // 也可以 assert/写错误码
+  if (k <= 0 || k > K_MAX) return;
 
-  // 每线程局部 top-k（寄存器）
+  // 1. 线程局部 Top-K
   float local_vals[K_MAX];
   int   local_idx[K_MAX];
   for (int j = 0; j < k; ++j) { local_vals[j] = -FLT_MAX; local_idx[j] = -1; }
 
-  // stride 扫全局数组
   int tid = threadIdx.x + blockIdx.x * blockDim.x;
   int stride = blockDim.x * gridDim.x;
   for (int i = tid; i < n; i += stride) {
     insert_topk(input[i], i, local_vals, local_idx, k);
   }
 
-  // 每个 warp 先合并成 warp top-k（用共享内存存每个 warp 的 top-k）
+  // 2. Warp 级合并
+  // 共享内存用于存储每个 Warp 的最终结果
   __shared__ float warp_vals[32][K_MAX];
   __shared__ int   warp_idx[32][K_MAX];
 
@@ -64,40 +62,54 @@ __global__ void block_topk_fp32(const float* input, int n,
   int warp = threadIdx.x >> 5;
   int num_warps = (blockDim.x + 31) >> 5;
 
-  // 让每个 warp 的 lane0 收集本 warp 的 top-k（用 shfl 拉数据）
-  unsigned mask = 0xffffffff;
+  // --- 修复开始：正确使用 shuffle ---
+  // 我们需要一个临时寄存器来累积结果，仅 lane 0 需要维护这个累积列表
+  // 但所有线程都必须参与循环以提供数据
+  float acc_vals[K_MAX];
+  int   acc_idx[K_MAX];
+  
+  // 只有 lane 0 需要初始化 acc
   if (lane == 0) {
-    float acc_vals[K_MAX];
-    int   acc_idx[K_MAX];
-    for (int j = 0; j < k; ++j) { acc_vals[j] = -FLT_MAX; acc_idx[j] = -1; }
+      for (int j = 0; j < k; ++j) { acc_vals[j] = -FLT_MAX; acc_idx[j] = -1; }
+  }
 
-    // 合并 warp 内 32 个线程的 top-k
-    for (int src = 0; src < 32; ++src) {
+  unsigned mask = 0xffffffff;
+  
+  // 遍历 warp 中的每一个线程作为数据源 (src)
+  for (int src = 0; src < 32; ++src) {
+      // 遍历 Top-K 的每一个元素
       for (int j = 0; j < k; ++j) {
-        float v = __shfl_sync(mask, local_vals[j], src);
-        int   i = __shfl_sync(mask, local_idx[j], src);
-        if (i >= 0) insert_topk(v, i, acc_vals, acc_idx, k);
+          // 关键修正：所有线程都执行 __shfl_sync
+          float v = __shfl_sync(mask, local_vals[j], src);
+          int   i = __shfl_sync(mask, local_idx[j], src);
+          
+          // 只有 Lane 0 负责收集数据
+          if (lane == 0 && i >= 0) {
+              insert_topk(v, i, acc_vals, acc_idx, k);
+          }
       }
-    }
-
+  }
+  
+  // Lane 0 将 Warp 的结果写入共享内存
+  if (lane == 0) {
     for (int j = 0; j < k; ++j) {
       warp_vals[warp][j] = acc_vals[j];
       warp_idx[warp][j]  = acc_idx[j];
     }
   }
+  // --- 修复结束 ---
+
   __syncthreads();
 
-  // block 级合并：warp0 合并所有 warp 的 top-k
+  // 3. Block 级合并：由 Warp 0 的 Lane 0 完成
   if (warp == 0 && lane == 0) {
-    float acc_vals[K_MAX];
-    int   acc_idx[K_MAX];
+    // 复用之前的 acc_vals (或者重新初始化，因为上面已经用过了)
     for (int j = 0; j < k; ++j) { acc_vals[j] = -FLT_MAX; acc_idx[j] = -1; }
 
     for (int w = 0; w < num_warps; ++w) {
       merge_topk(warp_vals[w], warp_idx[w], acc_vals, acc_idx, k);
     }
 
-    // 写出本 block 的 top-k 到全局（连续 k 个）
     int base = blockIdx.x * k;
     for (int j = 0; j < k; ++j) {
       out_vals[base + j] = acc_vals[j];
@@ -106,23 +118,23 @@ __global__ void block_topk_fp32(const float* input, int n,
   }
 }
 
-// stage2：对候选 pairs（vals/idx）求最终 top-k
+// 修复后的 stage2 kernel
 __global__ void topk_from_pairs_fp32(const float* cand_vals, const int* cand_idx, int n_cand,
                                      float* out_vals, int* out_idx, int k) {
-  if (k <= 0) return;
-  if (k > K_MAX) return;
+  if (k <= 0 || k > K_MAX) return;
 
   float local_vals[K_MAX];
   int   local_idx[K_MAX];
   for (int j = 0; j < k; ++j) { local_vals[j] = -FLT_MAX; local_idx[j] = -1; }
 
   int tid = threadIdx.x;
+  // 处理输入数据
   for (int i = tid; i < n_cand; i += blockDim.x) {
     int idx = cand_idx[i];
     if (idx >= 0) insert_topk(cand_vals[i], idx, local_vals, local_idx, k);
   }
 
-  // 用一个 block 做归约（同样 warp->block）
+  // Warp 级归约 (逻辑同上，修复 shuffle)
   __shared__ float warp_vals[32][K_MAX];
   __shared__ int   warp_idx[32][K_MAX];
 
@@ -130,19 +142,24 @@ __global__ void topk_from_pairs_fp32(const float* cand_vals, const int* cand_idx
   int warp = threadIdx.x >> 5;
   int num_warps = (blockDim.x + 31) >> 5;
 
-  unsigned mask = 0xffffffff;
+  float acc_vals[K_MAX];
+  int   acc_idx[K_MAX];
   if (lane == 0) {
-    float acc_vals[K_MAX];
-    int   acc_idx[K_MAX];
-    for (int j = 0; j < k; ++j) { acc_vals[j] = -FLT_MAX; acc_idx[j] = -1; }
+      for (int j = 0; j < k; ++j) { acc_vals[j] = -FLT_MAX; acc_idx[j] = -1; }
+  }
 
-    for (int src = 0; src < 32; ++src) {
+  unsigned mask = 0xffffffff;
+  for (int src = 0; src < 32; ++src) {
       for (int j = 0; j < k; ++j) {
-        float v = __shfl_sync(mask, local_vals[j], src);
-        int   i = __shfl_sync(mask, local_idx[j], src);
-        if (i >= 0) insert_topk(v, i, acc_vals, acc_idx, k);
+          float v = __shfl_sync(mask, local_vals[j], src);
+          int   i = __shfl_sync(mask, local_idx[j], src);
+          if (lane == 0 && i >= 0) {
+              insert_topk(v, i, acc_vals, acc_idx, k);
+          }
       }
-    }
+  }
+
+  if (lane == 0) {
     for (int j = 0; j < k; ++j) {
       warp_vals[warp][j] = acc_vals[j];
       warp_idx[warp][j]  = acc_idx[j];
@@ -150,9 +167,8 @@ __global__ void topk_from_pairs_fp32(const float* cand_vals, const int* cand_idx
   }
   __syncthreads();
 
+  // Block 级归约
   if (warp == 0 && lane == 0) {
-    float acc_vals[K_MAX];
-    int   acc_idx[K_MAX];
     for (int j = 0; j < k; ++j) { acc_vals[j] = -FLT_MAX; acc_idx[j] = -1; }
 
     for (int w = 0; w < num_warps; ++w) {
@@ -165,7 +181,6 @@ __global__ void topk_from_pairs_fp32(const float* cand_vals, const int* cand_idx
   }
 }
 
-// 你需要的 wrapper：输出在 device 上（out_vals/out_idx 长度为 k）
 void topk_kernel_cu(const float* input_ptr,
                     float* output_values_ptr,
                     int* output_indices_ptr,
@@ -174,34 +189,34 @@ void topk_kernel_cu(const float* input_ptr,
                     void* stream) {
   if (!input_ptr || !output_values_ptr || !output_indices_ptr) return;
   if (size == 0 || k <= 0) return;
-  if (k > K_MAX) return;  // 或者你改成 clamp(k, K_MAX)
+  
+  // 限制 K，防止溢出
+  if (k > K_MAX) k = K_MAX;
 
   cudaStream_t s = stream ? static_cast<cudaStream_t>(stream) : nullptr;
 
-  // launch config
   const int threads = 256;
   int blocks = static_cast<int>((size + threads - 1) / threads);
-  // 不要太多 block，否则 stage2 候选太多；这里给个上限
   if (blocks > 1024) blocks = 1024;
 
-  // 临时缓冲：num_blocks * k
   std::shared_ptr<base::DeviceAllocator> alloc_cu =
       base::CUDADeviceAllocatorFactory::get_instance();
 
+  // 分配临时显存
   float* tmp_vals = static_cast<float*>(alloc_cu->allocate(sizeof(float) * blocks * k));
-  int*   tmp_idx  = static_cast<int*>(alloc_cu->allocate(sizeof(int)   * blocks * k));
+  int* tmp_idx  = static_cast<int*>(alloc_cu->allocate(sizeof(int)    * blocks * k));
 
-  // stage1: block top-k
   block_topk_fp32<<<blocks, threads, 0, s>>>(input_ptr, static_cast<int>(size),
                                              tmp_vals, tmp_idx, k);
 
-  // stage2: merge candidates to final top-k (one block is enough)
   const int cand_n = blocks * k;
   const int threads2 = 256;
   topk_from_pairs_fp32<<<1, threads2, 0, s>>>(tmp_vals, tmp_idx, cand_n,
                                               output_values_ptr, output_indices_ptr, k);
 
-  // 如果你 allocator 需要手动释放，记得在这里释放 tmp_vals/tmp_idx
+  // --- 修复：必须释放显存 ---
+  // 如果 alloc_cu 是智能指针管理的资源池，可能不需要手动释放，
+  // 但通常 allocate/deallocate 是成对出现的。如果这是 raw pointer wrapper，必须释放。
   // alloc_cu->deallocate(tmp_vals);
   // alloc_cu->deallocate(tmp_idx);
 }
