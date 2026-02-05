@@ -217,8 +217,8 @@ void topk_kernel_cu(const float* input_ptr,
   // --- 修复：必须释放显存 ---
   // 如果 alloc_cu 是智能指针管理的资源池，可能不需要手动释放，
   // 但通常 allocate/deallocate 是成对出现的。如果这是 raw pointer wrapper，必须释放。
-  // alloc_cu->deallocate(tmp_vals);
-  // alloc_cu->deallocate(tmp_idx);
+  alloc_cu->release(tmp_vals);
+  alloc_cu->release(tmp_idx);
 }
 
 }  // namespace kernel
