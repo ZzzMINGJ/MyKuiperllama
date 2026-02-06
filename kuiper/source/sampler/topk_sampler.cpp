@@ -27,10 +27,62 @@ size_t TopKSampler::sample(const float* logits, size_t size, void* stream) {
   if (k == 0) k = 1;
   if (k > size) k = size;
 
-  // ==================== CPU 路径 (略) ====================
+  // ==================== CPU 路径 ====================
   if (device_type_ == base::DeviceType::kDeviceCPU) {
-      // ... (建议这里也改用 softmax 加权采样，暂时略过以聚焦 GPU) ...
-      return 0; 
+    // 1. 创建索引-值对的向量
+    std::vector<std::pair<float, int>> logit_pairs(size);
+    for (size_t i = 0; i < size; ++i) {
+      logit_pairs[i] = {logits[i], static_cast<int>(i)};
+    }
+
+    // 2. 找到topk个最大的元素（部分排序）
+    std::partial_sort(logit_pairs.begin(),
+                      logit_pairs.begin() + k,
+                      logit_pairs.end(),
+                      [](const auto& a, const auto& b) { return a.first > b.first; });
+
+    // 3. 提取topk的值和索引
+    std::vector<float> h_vals(k);
+    std::vector<int> h_idx(k);
+    for (size_t i = 0; i < k; ++i) {
+      h_vals[i] = logit_pairs[i].first;
+      h_idx[i] = logit_pairs[i].second;
+    }
+
+    // 4. Softmax + 加权采样（与GPU路径相同的逻辑）
+    // 步骤 A: 找到最大值以保持数值稳定
+    float max_logit = h_vals[0];
+    for (size_t i = 1; i < k; ++i) {
+      if (h_vals[i] > max_logit) max_logit = h_vals[i];
+    }
+
+    // 步骤 B: 计算指数并求和
+    float temperature = 1.0f;
+    std::vector<float> probs(k);
+    float sum_probs = 0.0f;
+
+    for (size_t i = 0; i < k; ++i) {
+      probs[i] = std::exp((h_vals[i] - max_logit) / temperature);
+      sum_probs += probs[i];
+    }
+
+    // 步骤 C: 随机选择
+    std::uniform_real_distribution<float> dist(0.0f, sum_probs);
+    float random_val = dist(get_rng());
+
+    // 步骤 D: 轮盘赌
+    float acc = 0.0f;
+    size_t selected_index = 0;
+    for (size_t i = 0; i < k; ++i) {
+      acc += probs[i];
+      if (random_val <= acc) {
+        selected_index = i;
+        break;
+      }
+    }
+
+    // 返回实际的 Token ID
+    return static_cast<size_t>(h_idx[selected_index]);
   }
 
   // ==================== GPU 路径 ====================
