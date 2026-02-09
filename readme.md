@@ -133,3 +133,7 @@ python3 hf_infer/qwen2_infer.py
 1. tools/export_qwen3/load.py中导出为pth，模型的输入`model_name`和输出地址`output_file`依次需要填写；
 2. 导出pth格式的模型后，再用同文件夹下的write_bin.py导出qwen.bin；
 3. 用CMake选项`QWEN3_SUPPORT`重新编译项目，其他步骤就都是一样的了。
+
+### Qwen3 代码导读（新手）
+
+- 自顶向下推理流程与底层代码设计说明：`docs/qwen3_inference_topdown_guide.md`
