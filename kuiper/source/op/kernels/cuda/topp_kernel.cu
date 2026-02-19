@@ -11,7 +11,7 @@
 namespace kernel {
 
 // top-p 过滤使用的候选数上限，与 topp_sampler.cpp 中的 K_MAX_TOPP 保持一致
-static constexpr int K_MAX_TOPP = 128;
+static constexpr int K_MAX_TOPP = 64;
 
 // 对 top-K 候选集应用 top-p（nucleus）过滤。
 //
