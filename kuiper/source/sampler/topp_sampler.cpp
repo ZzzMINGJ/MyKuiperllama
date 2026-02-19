@@ -40,9 +40,10 @@ size_t TopPSampler::sample(const float* logits, size_t size, void* stream) {
               [](const auto& a, const auto& b) { return a.first > b.first; });
 
     // 逐步累计概率（CDF），找到使 CDF >= p 的最小截止索引
+    // cutoff 默认为 size-1，确保浮点精度问题时也覆盖全部 token
     float cumulative  = 0.0f;
     float sum_top_exp = 0.0f; // 截止范围内的 exp 之和，用于局部归一化
-    size_t cutoff     = 0;
+    size_t cutoff     = size - 1;
     for (size_t i = 0; i < size; ++i) {
       float e    = std::exp(logit_pairs[i].first - max_exp);
       sum_top_exp += e;
