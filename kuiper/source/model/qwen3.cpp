@@ -105,6 +105,125 @@ Qwen3Model::Qwen3Model(base::TokenizerType tokenizer_type, std::string token_pat
     : Model(tokenizer_type, base::ModelType::kModelTypeLLama2, std::move(token_path),
             std::move(model_path), is_quant_model) {}
 
+Qwen3Model::~Qwen3Model() {
+  free_paged_kv_cache();
+}
+
+void Qwen3Model::free_paged_kv_cache() {
+  for (auto* ptr : key_cache_paged_dev_) {
+    if (ptr) cudaFree(ptr);
+  }
+  for (auto* ptr : val_cache_paged_dev_) {
+    if (ptr) cudaFree(ptr);
+  }
+  for (auto* ptr : page_table_dev_) {
+    if (ptr) cudaFree(ptr);
+  }
+  key_cache_paged_dev_.clear();
+  val_cache_paged_dev_.clear();
+  page_table_dev_.clear();
+}
+
+void Qwen3Model::init_paged_kv_cache() {
+  const int32_t n_layers = config_->layer_num_;
+  const int32_t kv_dim = config_->kv_dim_;
+  constexpr int32_t initial_blocks = 256;
+  max_logical_blocks_ = (config_->seq_len_ + kPagedBlockSize - 1) / kPagedBlockSize;
+
+  key_cache_paged_dev_.assign(n_layers, nullptr);
+  val_cache_paged_dev_.assign(n_layers, nullptr);
+  page_table_dev_.assign(n_layers, nullptr);
+  capacity_blocks_.assign(n_layers, initial_blocks);
+  next_free_block_.assign(n_layers, 0);
+  page_table_host_.assign(n_layers, std::vector<int32_t>(max_logical_blocks_, -1));
+
+  const size_t kv_bytes = (size_t)initial_blocks * kPagedBlockSize * kv_dim * sizeof(float);
+  const size_t pt_bytes = (size_t)max_logical_blocks_ * sizeof(int32_t);
+
+  for (int32_t l = 0; l < n_layers; ++l) {
+    cudaMalloc(&key_cache_paged_dev_[l], kv_bytes);
+    cudaMalloc(&val_cache_paged_dev_[l], kv_bytes);
+    cudaMalloc(&page_table_dev_[l], pt_bytes);
+    // Init page table to -1 (0xFF bytes = 0xFFFFFFFF int32 = -1)
+    cudaMemset(page_table_dev_[l], 0xFF, pt_bytes);
+  }
+}
+
+void Qwen3Model::ensure_paged_capacity(int32_t layer_idx, int32_t needed_blocks) const {
+  if (needed_blocks <= capacity_blocks_[layer_idx]) {
+    return;
+  }
+  int32_t new_capacity = capacity_blocks_[layer_idx] * 2;
+  while (new_capacity < needed_blocks) {
+    new_capacity *= 2;
+  }
+
+  const int32_t kv_dim = config_->kv_dim_;
+  const size_t old_bytes = (size_t)capacity_blocks_[layer_idx] * kPagedBlockSize * kv_dim * sizeof(float);
+  const size_t new_bytes = (size_t)new_capacity * kPagedBlockSize * kv_dim * sizeof(float);
+
+  float* new_key = nullptr;
+  cudaMalloc(&new_key, new_bytes);
+  cudaMemcpy(new_key, key_cache_paged_dev_[layer_idx], old_bytes, cudaMemcpyDeviceToDevice);
+  cudaFree(key_cache_paged_dev_[layer_idx]);
+  key_cache_paged_dev_[layer_idx] = new_key;
+
+  float* new_val = nullptr;
+  cudaMalloc(&new_val, new_bytes);
+  cudaMemcpy(new_val, val_cache_paged_dev_[layer_idx], old_bytes, cudaMemcpyDeviceToDevice);
+  cudaFree(val_cache_paged_dev_[layer_idx]);
+  val_cache_paged_dev_[layer_idx] = new_val;
+
+  capacity_blocks_[layer_idx] = new_capacity;
+}
+
+std::pair<tensor::Tensor, tensor::Tensor> Qwen3Model::slice_kv_cache_paged(int32_t layer_idx,
+                                                                            int32_t pos) const {
+  const int32_t lb = pos / kPagedBlockSize;
+  const int32_t off = pos % kPagedBlockSize;
+  const int32_t kv_dim = config_->kv_dim_;
+
+  int32_t phys_block = page_table_host_[layer_idx][lb];
+  if (phys_block == -1) {
+    // Allocate a new physical block
+    phys_block = next_free_block_[layer_idx]++;
+    ensure_paged_capacity(layer_idx, phys_block + 1);
+    page_table_host_[layer_idx][lb] = phys_block;
+
+    // Sync updated entry to device page table
+    if (cuda_config_) {
+      cudaMemcpyAsync(page_table_dev_[layer_idx] + lb, &phys_block, sizeof(int32_t),
+                      cudaMemcpyHostToDevice, cuda_config_->stream);
+    } else {
+      cudaMemcpy(page_table_dev_[layer_idx] + lb, &phys_block, sizeof(int32_t),
+                 cudaMemcpyHostToDevice);
+    }
+  }
+
+  const int64_t cache_offset = ((int64_t)phys_block * kPagedBlockSize + off) * kv_dim;
+  float* key_ptr = key_cache_paged_dev_[layer_idx] + cache_offset;
+  float* val_ptr = val_cache_paged_dev_[layer_idx] + cache_offset;
+
+  tensor::Tensor key(base::DataType::kDataTypeFp32, kv_dim, false, nullptr, key_ptr);
+  tensor::Tensor val(base::DataType::kDataTypeFp32, kv_dim, false, nullptr, val_ptr);
+  key.set_device_type(device_type_);
+  val.set_device_type(device_type_);
+  return {key, val};
+}
+
+void Qwen3Model::reset_paged_state() const {
+  const int32_t n_layers = config_->layer_num_;
+  const size_t pt_bytes = (size_t)max_logical_blocks_ * sizeof(int32_t);
+
+  for (int32_t l = 0; l < n_layers; ++l) {
+    next_free_block_[l] = 0;
+    std::fill(page_table_host_[l].begin(), page_table_host_[l].end(), -1);
+    if (page_table_dev_[l]) {
+      cudaMemset(page_table_dev_[l], 0xFF, pt_bytes);
+    }
+  }
+}
+
 base::Status Qwen3Model::init(base::DeviceType device_type) {
   using namespace base;
   if (token_path_.empty()) {
@@ -354,6 +473,11 @@ void Qwen3Model::init_mem() {
   CHECK(insert_buffer(ModelBufferType::kKeyCache, key_cache));
   CHECK(insert_buffer(ModelBufferType::kValueCache, value_cache));
 
+  // Paged KV cache (dynamic device allocation, managed separately from buffers_)
+  if (use_paged_attention_ && device_type_ == base::DeviceType::kDeviceCUDA) {
+    init_paged_kv_cache();
+  }
+
   // Wq query output
   tensor::Tensor query(base::DataType::kDataTypeFp32, config_->dim_, true, alloc);
   CHECK(insert_buffer(ModelBufferType::kQuery, query));
@@ -473,8 +597,9 @@ void Qwen3Model::attention_qkv(int32_t layer_idx, const tensor::Tensor& pos_tens
   // kv cache
   tensor::Tensor query = this->get_buffer(ModelBufferType::kQuery);
   int32_t pos = pos_tensor.index<int32_t>(0);
-  // wq wk wv @ input
-  auto [key, val] = slice_kv_cache(layer_idx, pos);
+  // wq wk wv @ input: get view into KV cache (paged or baseline)
+  auto [key, val] = use_paged_attention_ ? slice_kv_cache_paged(layer_idx, pos)
+                                         : slice_kv_cache(layer_idx, pos);
 
   // query
   const auto& query_layer = qwen_layers_->wq_layers_.at(layer_idx);
@@ -525,11 +650,6 @@ base::Status Qwen3Model::predict(const tensor::Tensor& input, const tensor::Tens
 
 void Qwen3Model::attention_mha(int32_t layer_idx, const tensor::Tensor& pos_tensor) const {
   CHECK(qwen_layers_ != nullptr);
-  // mha
-  tensor::Tensor key_cache = get_buffer(ModelBufferType::kKeyCache);
-  // VAL = [val1,val2,...val t]
-  // output @ VAL = 最终的结果
-  tensor::Tensor val_cache = get_buffer(ModelBufferType::kValueCache);
 
   tensor::Tensor mha_output = get_buffer(ModelBufferType::kOutputMHA);
   tensor::Tensor score_storage = get_buffer(ModelBufferType::kScoreStorage);
@@ -538,9 +658,21 @@ void Qwen3Model::attention_mha(int32_t layer_idx, const tensor::Tensor& pos_tens
   const auto& mha_layer = qwen_layers_->mha_layer_;
   CHECK_NE(mha_layer, nullptr) << "The multi head attention layer is null pointer.";
   int pos = pos_tensor.index<int32_t>(0);
-  std::dynamic_pointer_cast<op::MultiHeadAttention>(mha_layer)->set_pos(pos);
-  std::dynamic_pointer_cast<op::MultiHeadAttention>(mha_layer)->set_layer_idx(layer_idx);
-  STATUS_CHECK(mha_layer->forward(query, score_storage, key_cache, val_cache, mha_output));
+
+  auto mha = std::dynamic_pointer_cast<op::MultiHeadAttention>(mha_layer);
+  mha->set_pos(pos);
+  mha->set_layer_idx(layer_idx);
+
+  if (use_paged_attention_ && device_type_ == base::DeviceType::kDeviceCUDA) {
+    STATUS_CHECK(mha->forward_paged(query, score_storage, key_cache_paged_dev_[layer_idx],
+                                    val_cache_paged_dev_[layer_idx], page_table_dev_[layer_idx],
+                                    kPagedBlockSize, mha_output));
+  } else {
+    // Baseline: pass full KV cache tensors
+    tensor::Tensor key_cache = get_buffer(ModelBufferType::kKeyCache);
+    tensor::Tensor val_cache = get_buffer(ModelBufferType::kValueCache);
+    STATUS_CHECK(mha_layer->forward(query, score_storage, key_cache, val_cache, mha_output));
+  }
 
   // wo @ attention output
   tensor::Tensor attn_output = get_buffer(ModelBufferType::kAttnOutput);

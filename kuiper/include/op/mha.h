@@ -16,6 +16,12 @@ class MultiHeadAttention : public op::Layer {
 
   base::Status forward() override;
 
+  // Paged attention forward: K/V accessed via page_table (device pointers)
+  base::Status forward_paged(const tensor::Tensor& query, const tensor::Tensor& score_storage,
+                              float* key_cache_paged_dev, float* val_cache_paged_dev,
+                              const int32_t* page_table_dev, int32_t block_size,
+                              const tensor::Tensor& mha_out);
+
  private:
   int32_t layer_index_ = 0;
   int32_t pos_ = 0;

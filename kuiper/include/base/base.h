@@ -29,6 +29,10 @@ enum class ModelBufferType {
 
   kSinCache = 17,
   kCosCache = 18,
+
+  // Paged KV cache (page table managed externally in Qwen3Model)
+  kKeyCachePaged = 19,
+  kValueCachePaged = 20,
 };
 }
 

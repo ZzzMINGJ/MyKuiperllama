@@ -50,6 +50,8 @@ class Qwen3Model : public Model {
   explicit Qwen3Model(base::TokenizerType tokenizer_type, std::string token_path,
                       std::string model_path, bool is_quant_model);
 
+  ~Qwen3Model();
+
   base::Status init(base::DeviceType device_type) override;
 
   base::Status predict(const tensor::Tensor& input, const tensor::Tensor& pos_tensor,
@@ -59,6 +61,12 @@ class Qwen3Model : public Model {
                        int& next) const override;
 
   op::EmbeddingOutput embedding(const std::vector<int>& tokens) const override;
+
+  // Enable paged attention mode (must be called before init)
+  void set_use_paged_attention(bool use_paged) { use_paged_attention_ = use_paged; }
+
+  // Reset paged state for correctness testing (resets page table and block allocator)
+  void reset_paged_state() const;
 
  private:
   void init_mem() override;
@@ -83,9 +91,31 @@ class Qwen3Model : public Model {
 
   int32_t post_processing(const tensor::Tensor& pos, bool is_prompt) const override;
 
+  // Paged KV cache helpers
+  std::pair<tensor::Tensor, tensor::Tensor> slice_kv_cache_paged(int32_t layer_idx,
+                                                                  int32_t pos) const;
+  void ensure_paged_capacity(int32_t layer_idx, int32_t needed_blocks) const;
+  void init_paged_kv_cache();
+  void free_paged_kv_cache();
+
  private:
   std::shared_ptr<kernel::CudaConfig> cuda_config_;
   std::unique_ptr<Qwen3Layers> qwen_layers_;
+
+  // Paged attention state
+  bool use_paged_attention_ = false;
+  static constexpr int32_t kPagedBlockSize = 16;
+  int32_t max_logical_blocks_ = 0;
+
+  // Per-layer paged KV cache (device pointers, managed with cudaMalloc/cudaFree)
+  mutable std::vector<float*> key_cache_paged_dev_;
+  mutable std::vector<float*> val_cache_paged_dev_;
+  // Per-layer page table: host + device copies
+  mutable std::vector<int32_t*> page_table_dev_;
+  mutable std::vector<std::vector<int32_t>> page_table_host_;
+  // Per-layer physical block allocator
+  mutable std::vector<int32_t> capacity_blocks_;
+  mutable std::vector<int32_t> next_free_block_;
 };
 }  // namespace model
 

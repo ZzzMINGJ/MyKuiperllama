@@ -1,5 +1,6 @@
 #include "op/mha.h"
 #include "kernels/cpu/mha_kernel.h"
+#include "kernels/cuda/mha_kernel.cuh"
 #include "kernels/kernels_interface.h"
 namespace op {
 MultiHeadAttention::MultiHeadAttention(base::DeviceType device_type, int32_t layer_index,
@@ -34,6 +35,23 @@ base::Status MultiHeadAttention::forward() {
                                        head_size_, mha_out, query_tensor, score_tensor,
                                        key_cache_tensor, value_cache_tensor, device_type_,
                                        cuda_config_ ? cuda_config_.get() : nullptr);
+  return base::error::Success();
+}
+
+base::Status MultiHeadAttention::forward_paged(const tensor::Tensor& query,
+                                               const tensor::Tensor& score_storage,
+                                               float* key_cache_paged_dev,
+                                               float* val_cache_paged_dev,
+                                               const int32_t* page_table_dev, int32_t block_size,
+                                               const tensor::Tensor& mha_out) {
+  if (device_type_ == base::DeviceType::kDeviceCUDA) {
+    CHECK(cuda_config_ != nullptr);
+    kernel::mha_kernel_paged_cu(pos_, head_num_, seq_len_, kv_dim_, kv_mul_, head_size_,
+                                block_size, mha_out, query, score_storage, key_cache_paged_dev,
+                                val_cache_paged_dev, page_table_dev, cuda_config_.get());
+  } else {
+    return base::error::FunctionNotImplement("Paged attention CPU kernel not implemented");
+  }
   return base::error::Success();
 }
 
