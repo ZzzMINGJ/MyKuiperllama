@@ -141,9 +141,9 @@ void Qwen3Model::init_paged_kv_cache() {
   const size_t pt_bytes = (size_t)max_logical_blocks_ * sizeof(int32_t);
 
   for (int32_t l = 0; l < n_layers; ++l) {
-    cudaMalloc(&key_cache_paged_dev_[l], kv_bytes);
-    cudaMalloc(&val_cache_paged_dev_[l], kv_bytes);
-    cudaMalloc(&page_table_dev_[l], pt_bytes);
+    cudaMalloc(reinterpret_cast<void**>(&key_cache_paged_dev_[l]), kv_bytes);
+    cudaMalloc(reinterpret_cast<void**>(&val_cache_paged_dev_[l]), kv_bytes);
+    cudaMalloc(reinterpret_cast<void**>(&page_table_dev_[l]), pt_bytes);
     // Init page table to -1 (0xFF bytes = 0xFFFFFFFF int32 = -1)
     cudaMemset(page_table_dev_[l], 0xFF, pt_bytes);
   }
@@ -163,13 +163,13 @@ void Qwen3Model::ensure_paged_capacity(int32_t layer_idx, int32_t needed_blocks)
   const size_t new_bytes = (size_t)new_capacity * kPagedBlockSize * kv_dim * sizeof(float);
 
   float* new_key = nullptr;
-  cudaMalloc(&new_key, new_bytes);
+  cudaMalloc(reinterpret_cast<void**>(&new_key), new_bytes);
   cudaMemcpy(new_key, key_cache_paged_dev_[layer_idx], old_bytes, cudaMemcpyDeviceToDevice);
   cudaFree(key_cache_paged_dev_[layer_idx]);
   key_cache_paged_dev_[layer_idx] = new_key;
 
   float* new_val = nullptr;
-  cudaMalloc(&new_val, new_bytes);
+  cudaMalloc(reinterpret_cast<void**>(&new_val), new_bytes);
   cudaMemcpy(new_val, val_cache_paged_dev_[layer_idx], old_bytes, cudaMemcpyDeviceToDevice);
   cudaFree(val_cache_paged_dev_[layer_idx]);
   val_cache_paged_dev_[layer_idx] = new_val;
