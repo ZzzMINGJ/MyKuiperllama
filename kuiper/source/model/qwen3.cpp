@@ -212,6 +212,7 @@ std::pair<tensor::Tensor, tensor::Tensor> Qwen3Model::slice_kv_cache_paged(int32
 }
 
 void Qwen3Model::reset_paged_state() const {
+  if (!use_paged_attention_ || next_free_block_.empty()) return;
   const int32_t n_layers = config_->layer_num_;
   const size_t pt_bytes = (size_t)max_logical_blocks_ * sizeof(int32_t);
 
@@ -222,6 +223,19 @@ void Qwen3Model::reset_paged_state() const {
       cudaMemset(page_table_dev_[l], 0xFF, pt_bytes);
     }
   }
+}
+
+size_t Qwen3Model::get_baseline_kv_bytes() const {
+  return (size_t)config_->layer_num_ * config_->seq_len_ * config_->kv_dim_ * sizeof(float) * 2;
+}
+
+size_t Qwen3Model::get_paged_kv_bytes_allocated() const {
+  if (!use_paged_attention_ || next_free_block_.empty()) return 0;
+  size_t total = 0;
+  for (int32_t l = 0; l < config_->layer_num_; ++l) {
+    total += (size_t)next_free_block_[l] * kPagedBlockSize * config_->kv_dim_ * sizeof(float) * 2;
+  }
+  return total;
 }
 
 base::Status Qwen3Model::init(base::DeviceType device_type) {

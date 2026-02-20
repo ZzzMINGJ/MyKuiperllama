@@ -68,6 +68,11 @@ class Qwen3Model : public Model {
   // Reset paged state for correctness testing (resets page table and block allocator)
   void reset_paged_state() const;
 
+  // KV cache memory stats
+  int32_t get_seq_len() const { return config_->seq_len_; }
+  size_t get_baseline_kv_bytes() const;
+  size_t get_paged_kv_bytes_allocated() const;
+
  private:
   void init_mem() override;
 
