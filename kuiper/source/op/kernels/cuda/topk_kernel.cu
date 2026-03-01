@@ -11,7 +11,7 @@ namespace kernel {
 
 // 当前实现使用栈上固定长度数组保存中间 Top-K，因此这里限制最大 K。
 // 如需支持更大 K，需要同步评估局部数组、共享内存和寄存器压力。
-static constexpr int K_MAX = 128;
+static constexpr int K_MAX = 32;
 
 // 将一个候选值插入到降序排列的 Top-K 缓冲区中。
 // - vals/idxs 长度至少为 k，且初始值通常为 (-FLT_MAX, -1)。
